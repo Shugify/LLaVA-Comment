@@ -51,11 +51,13 @@ def eval_model(args):
     # Model
     disable_torch_init()
 
+    #进去看一下model_path, model_base, model_name,的值
     model_name = get_model_name_from_path(args.model_path)
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         args.model_path, args.model_base, model_name
     )
 
+    #处理问题中的<image>（替换或增加，以及根据需求调整格式）
     qs = args.query
     image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
     if IMAGE_PLACEHOLDER in qs:
@@ -96,6 +98,8 @@ def eval_model(args):
     conv.append_message(conv.roles[0], qs)
     conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
+    #断点看一下prompt，形如：对话模式描述+"USER:"+qs+"ASSISTANT:"；
+    #qs中已经含有<image>，当前函数开始时处理
 
     image_files = image_parser(args)
     images = load_images(image_files)
@@ -105,6 +109,7 @@ def eval_model(args):
         image_processor,
         model.config
     ).to(model.device, dtype=torch.float16)
+    #这一步将图片转化为视觉编码器（VIT或CLIP）可以使用的tensor
 
     input_ids = (
         tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
@@ -112,6 +117,13 @@ def eval_model(args):
         .cuda()
     )
 
+    '''
+    inference_mode 是一个上下文管理器，关闭grad计算和version counter，用于推理
+    类似的有torch.no_grad(),只关闭gard，不关闭version counter，同样用于推理
+    还有torch.enable_grad()，开启grad计算和version counter，用于训练
+    还有torch.set_grad_enabled(mode)，mode为True或False，开启或关闭grad
+    源代码路径在：conda环境文件夹/lib/python3.10/site-packages/torch/autograd/grad_mode.py
+    '''
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,

@@ -29,12 +29,21 @@ from llava.mm_utils import get_anyres_image_grid_shape
 class LlavaMetaModel:
 
     def __init__(self, config):
+        #super表示调用父类的函数，这里的作用是请在当前实例 (self) 的继承链 (MRO) 中，找到紧跟在 LlavaMetaModel 后面的那个类，并调用它的 __init__ 方法
         super(LlavaMetaModel, self).__init__(config)
 
+        #检查配置文件 config 中是否存在 mm_vision_tower 这个属性。如果存在，说明这个模型是一个多模态模型，需要初始化视觉模块
         if hasattr(config, "mm_vision_tower"):
+            # 懒加载，实际上只加载了参数文件，需要在后面增加vision_tower.load_model()继续加载模型参数
             self.vision_tower = build_vision_tower(config, delay_load=True)
             self.mm_projector = build_vision_projector(config)
 
+            '''
+            这是一个针对特定图像处理策略的实现。当 mm_patch_merge_type 配置为 'unpad' 时，意味着模型会处理可变分辨率的图像。
+            self.image_newline: 在这种情况下，会创建一个可学习的参数 image_newline。
+            这个参数可以被看作是一个特殊的“换行符”嵌入向量，
+            用于在拼接不同图像块（patch）的特征时，分隔来自不同行的图像块特征，从而保留图像的空间布局信息。
+            '''
             if 'unpad' in getattr(config, 'mm_patch_merge_type', ''):
                 self.image_newline = nn.Parameter(
                     torch.empty(config.hidden_size, dtype=self.dtype)
@@ -42,23 +51,53 @@ class LlavaMetaModel:
 
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)
+        #防御性编程，用于应对后续可能有多个视觉编码器的复杂情况
         if type(vision_tower) is list:
             vision_tower = vision_tower[0]
         return vision_tower
 
+    #加载和配置视觉相关的模块，包括加载预训练权重。
     def initialize_vision_modules(self, model_args, fsdp=None):
+        #视觉骨干网络（Visual Tower）模型路径或类型。
         vision_tower = model_args.vision_tower
+        #选择视觉模型中用于提取特征的层编号。比如-2表示表示选择视觉模型倒数第二层的输出
         mm_vision_select_layer = model_args.mm_vision_select_layer
+        #选择视觉特征的类型（feature type）。
+        '''
+        视觉模型通常会输出几种不同的特征，例如：
+        "patch"：图像分块（patch）特征（常见于 ViT）
+        "cls"：特殊的 [CLS] token 特征（代表整张图像的全局语义）
+        "mean"：对所有 patch 特征取平均后的全局特征
+        功能：
+        控制视觉输入的粒度，是使用全图特征还是每个 patch 特征。
+        '''
         mm_vision_select_feature = model_args.mm_vision_select_feature
+        #预训练的视觉-语言特征对齐层（adapter）的路径或权重。多层感知机（MLP Adapter）
         pretrain_mm_mlp_adapter = model_args.pretrain_mm_mlp_adapter
+        #视觉特征合并方式（Patch Merge Type）。
+        '''
+        在将 patch-level 特征输入语言模型前，常需要进行降维或聚合。
+        此参数控制 patch 特征如何被合并或转换。
+        常见取值及含义：
+        "flat"	将所有 patch 特征直接展开（不合并）输入语言模型。
+        "mean"	对所有 patch 特征取平均，形成一个全局视觉向量。
+        "mlp"	用一个小型 MLP 进行降维或融合。
+        "conv"	使用卷积层进行降采样或特征整合。
+        "token"	保留部分重要 patch（如中心区域或注意力高的 patch）。
+        '''
         mm_patch_merge_type = model_args.mm_patch_merge_type
 
         self.config.mm_vision_tower = vision_tower
 
+        #如果没有加载视觉编码器，则构建并加载它
         if self.get_vision_tower() is None:
             vision_tower = build_vision_tower(model_args)
 
+            #fsdp： Fully Sharded Data Parallel 的缩写，中文全称是“完全分片数据并行”。它是 PyTorch 提供的一种先进的、用于大规模模型训练的分布式训练技术。
             if fsdp is not None and len(fsdp) > 0:
+                # FSDP 对模型代码的要求
+                # 为了让 FSDP 能够正确地“包裹”和“分片”一个模块，这个模块必须被封装在一个 nn.ModuleList 或者 Python 列表中。
+                # FSDP 会遍历这个列表，并对其中的每一个 nn.Module 单独应用分片策略。因此会有下面的写法
                 self.vision_tower = [vision_tower]
             else:
                 self.vision_tower = vision_tower
@@ -69,6 +108,7 @@ class LlavaMetaModel:
                 vision_tower = self.vision_tower
             vision_tower.load_model()
 
+        # ... (配置投影层相关的参数)
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, 'mm_projector_type', 'linear')
         self.config.mm_hidden_size = vision_tower.hidden_size
@@ -80,20 +120,34 @@ class LlavaMetaModel:
             self.mm_projector = build_vision_projector(self.config)
 
             if 'unpad' in mm_patch_merge_type:
+                #定义了一个标准差 embed_std，控制初始化范围
                 embed_std = 1 / torch.sqrt(torch.tensor(self.config.hidden_size, dtype=self.dtype))
                 self.image_newline = nn.Parameter(
+                    # 生成一个服从标准正态分布的张量（tensor），即每个元素都来自 N(0,1) 分布
+                    # self.config.hidden_size 指定了张量的形状（张量维度，数字个数等） dtype=self.dtype为张量的数据类型
+                    # embed_std是缩放因子，可以缩小方差
                     torch.randn(self.config.hidden_size, dtype=self.dtype) * embed_std
                 )
         else:
             # In case it is frozen by LoRA
+            # 这种情况是为了应对 LoRA (Low-Rank Adaptation) 等微调技术。
+            # LoRA 可能会冻结模型的大部分原始权重，只训练少量的适配器权重。
+            # 如果 mm_projector 之前被冻结了，这行代码确保解冻它，
+            # 使得它的参数可以被训练和更新。
             for p in self.mm_projector.parameters():
                 p.requires_grad = True
 
         if pretrain_mm_mlp_adapter is not None:
+            # 1. 加载权重文件
+            # pretrain_mm_mlp_adapter 是一个指向 .bin 或 .pt 文件的路径。
+            # torch.load 将这个文件加载到 CPU 内存中，得到一个权重字典。
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
+
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
 
+            # 3. 将解析后的权重加载到模型中
+            # load_state_dict 是 PyTorch 模块的标准方法，用于加载权重。
             self.mm_projector.load_state_dict(get_w(mm_projector_weights, 'mm_projector'))
 
 

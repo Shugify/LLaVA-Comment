@@ -1,3 +1,7 @@
+'''
+视觉编辑器，CLIP的视觉编码器部分
+'''
+
 import torch
 import torch.nn as nn
 
@@ -11,32 +15,43 @@ class CLIPVisionTower(nn.Module):
         self.is_loaded = False
 
         self.vision_tower_name = vision_tower
+        # 选择使用哪一层的隐藏状态作为输出特征
         self.select_layer = args.mm_vision_select_layer
+        # getattr: 获取对象的属性值，如果属性不存在则返回默认值
         self.select_feature = getattr(args, 'mm_vision_select_feature', 'patch')
 
+        # --- 核心的懒加载逻辑 ---
         if not delay_load:
             self.load_model()
         elif getattr(args, 'unfreeze_mm_vision_tower', False):
             self.load_model()
         else:
+            # 只加载配置文件
             self.cfg_only = CLIPVisionConfig.from_pretrained(self.vision_tower_name)
 
     def load_model(self, device_map=None):
         if self.is_loaded:
             print('{} is already loaded, `load_model` called again, skipping.'.format(self.vision_tower_name))
             return
-
+        
+        # 加载图像预处理器，负责将图像缩放、归一化
         self.image_processor = CLIPImageProcessor.from_pretrained(self.vision_tower_name)
         self.vision_tower = CLIPVisionModel.from_pretrained(self.vision_tower_name, device_map=device_map)
+        # 视觉编码器不需要训练，关闭梯度计算
         self.vision_tower.requires_grad_(False)
 
         self.is_loaded = True
 
     def feature_select(self, image_forward_outs):
+         # 从 CLIP 输出中，根据 __init__ 中设定的层索引，获取那一层的隐藏状态
         image_features = image_forward_outs.hidden_states[self.select_layer]
         if self.select_feature == 'patch':
+            # Vision Transformer 的输出第一个 token 是 [CLS] token，代表全局特征。
+            # 后面的 N 个 token 分别对应图像被切分成的 N 个小块（patch）。
+            # 这行代码的意思是：扔掉 [CLS] token，只保留所有 patch 的特征。
             image_features = image_features[:, 1:]
         elif self.select_feature == 'cls_patch':
+            # 保留所有特征，包括 [CLS] 和 patches
             image_features = image_features
         else:
             raise ValueError(f'Unexpected select feature: {self.select_feature}')
@@ -51,11 +66,15 @@ class CLIPVisionTower(nn.Module):
                 image_feature = self.feature_select(image_forward_out).to(image.dtype)
                 image_features.append(image_feature)
         else:
+            # 1. 将图像张量传递给 vision_tower
+            # 2. output_hidden_states=True 是必须的，这样才能获取中间层特征
             image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=self.dtype), output_hidden_states=True)
+            # 3. 调用 feature_select 加工原始输出
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
 
         return image_features
 
+    #@property是 Python 的一个装饰器，它能将一个方法（函数）变成一个只读属性。
     @property
     def dummy_feature(self):
         return torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)

@@ -1,3 +1,7 @@
+'''
+mm_utils.py,主要负责图像相关（multi-modal）的处理
+'''
+
 from PIL import Image
 from io import BytesIO
 import base64
@@ -149,12 +153,15 @@ def load_image_from_base64(image):
     return Image.open(BytesIO(base64.b64decode(image)))
 
 
+#将图片填充为正方形，填充颜色为background_color
 def expand2square(pil_img, background_color):
     width, height = pil_img.size
     if width == height:
         return pil_img
     elif width > height:
+        #创建一个新的正方形图片，宽高为width，颜色为background_color
         result = Image.new(pil_img.mode, (width, width), background_color)
+        #将原图片粘贴到新图片的中间
         result.paste(pil_img, (0, (width - height) // 2))
         return result
     else:
@@ -163,6 +170,7 @@ def expand2square(pil_img, background_color):
         return result
 
 
+#生成pixel_values的过程
 def process_images(images, image_processor, model_cfg):
     image_aspect_ratio = getattr(model_cfg, "image_aspect_ratio", None)
     new_images = []
@@ -182,8 +190,12 @@ def process_images(images, image_processor, model_cfg):
     return new_images
 
 
+# 把多模态 prompt（包含 <image> 占位符的文本）转换成模型可理解的 token 序列，连接 文本输入（prompt） 与 图像输入（image）
 def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
+    
     prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
+    #断点看一下prompt_chunks，使用图片占位符分割后使用tokenizer生成对应的tokens
+    #prompt_chunks每一块前面都加了tokenizer.bos_token_id（如果有的话）
 
     def insert_separator(X, sep):
         return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
@@ -196,6 +208,7 @@ def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX
 
     for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
         input_ids.extend(x[offset:])
+
 
     if return_tensors is not None:
         if return_tensors == 'pt':

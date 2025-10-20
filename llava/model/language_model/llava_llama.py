@@ -26,9 +26,11 @@ from transformers.generation.utils import GenerateOutput
 
 from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 
-
+#保存模型的 超参数（例如隐藏层大小、注意力头数、词汇表大小等）。
+#提供 默认初始化值，方便用户快速创建模型
 class LlavaConfig(LlamaConfig):
     model_type = "llava_llama"
+
 
 
 class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
@@ -37,12 +39,28 @@ class LlavaLlamaModel(LlavaMetaModel, LlamaModel):
     def __init__(self, config: LlamaConfig):
         super(LlavaLlamaModel, self).__init__(config)
 
+'''
+类名称 (Class Name)	主要作用	继承关系/构成	核心功能
+LlamaModel	基础语言模型	PreTrainedModel	纯文本处理，输出隐藏状态[1]
+LlavaMetaModel	多模态组件管理器	-	管理视觉编码器和投影器[2]
+LlavaLlamaModel	融合视觉和语言的核心模型	LlavaMetaModel, LlamaModel	整合图像特征和文本特征[2][5]
+LlavaMetaForCausalLM	多模态文本生成的抽象逻辑	-	定义如何准备图像和文本混合输入[2]
+LlavaLlamaForCausalLM	完整的、可执行的多模态生成模型	LlamaForCausalLM, LlavaMetaForCausalLM	接收图像和文本，并生成连贯的文本回答[2][5]
+'''
+
+'''
+当用户输入一张图片和一个问题时，LlavaLlamaForCausalLM 模型开始工作。
+它内部的 LlavaMetaModel 部分会调用视觉编码器处理图像，并通过投影器将其转换为与文本嵌入兼容的特征。
+接着，LlavaMetaForCausalLM 的逻辑会将这些图像特征与用户问题的文本 token 拼接在一起。
+最后，这个拼接好的序列被送入继承自 LlamaForCausalLM 的语言模型部分，模型会像处理纯文本一样，逐字生成答案，完成一次图文对话。
+'''
 
 class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
     config_class = LlavaConfig
 
     def __init__(self, config):
         super(LlamaForCausalLM, self).__init__(config)
+        #用一个“多模态核心” (LlavaLlamaModel) 替换了原来语言模型的“纯文本核心” (LlamaModel)
         self.model = LlavaLlamaModel(config)
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
@@ -54,6 +72,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
     def get_model(self):
         return self.model
 
+    # 用于训练，有梯度计算
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -70,6 +89,10 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
+        # self.prepare_inputs_labels_for_multimodal() 方法
+        # 将图像 images 通过视觉编码器和投影器，转换成一系列向量 (image embeddings)。
+        # 将文本 input_ids 转换成文本向量 (text embeddings)。
+        # 将图像向量和文本向量智能地拼接在一起，形成一个统一的、混合了视觉和语言信息的 inputs_embeds。
         if inputs_embeds is None:
             (
                 input_ids,
@@ -102,6 +125,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         )
 
     @torch.no_grad()
+    #用于推理，没有梯度计算
     def generate(
         self,
         inputs: Optional[torch.Tensor] = None,
@@ -141,13 +165,16 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             **kwargs
         )
 
+    #自定义的 prepare_inputs_for_generation 方法
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None,
                                       inputs_embeds=None, **kwargs):
         images = kwargs.pop("images", None)
         image_sizes = kwargs.pop("image_sizes", None)
+        # 调用父类的同名方法，获取基础的输入字典
         inputs = super().prepare_inputs_for_generation(
             input_ids, past_key_values=past_key_values, inputs_embeds=inputs_embeds, **kwargs
         )
+        # 将图像信息重新添加回输入字典
         if images is not None:
             inputs['images'] = images
         if image_sizes is not None:

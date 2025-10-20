@@ -23,12 +23,19 @@ from llava.model import *
 from llava.constants import DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
 
+'''
+model_path (str): 存放模型权重和配置文件的路径。这可能是完整的模型，也可能只是 LoRA 适配器权重。
+model_base (str, 可选): 基础模型的路径。当 model_path 只包含 LoRA 权重或投影层权重时，需要提供这个参数来加载原始的、完整的大语言模型。
+model_name (str): 模型的名称，代码会通过检查这个名称中是否包含 "llava" 来判断是否要加载多模态模型。
+'''
+
 def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, load_4bit=False, device_map="auto", device="cuda", use_flash_attn=False, **kwargs):
     kwargs = {"device_map": device_map, **kwargs}
 
     if device != "cuda":
         kwargs['device_map'] = {"": device}
 
+    # 量化模型，以什么样的精度加载模型
     if load_8bit:
         kwargs['load_in_8bit'] = True
     elif load_4bit:
@@ -42,13 +49,19 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
     else:
         kwargs['torch_dtype'] = torch.float16
 
+
     if use_flash_attn:
         kwargs['attn_implementation'] = 'flash_attention_2'
 
+    #加载LLaVA多模态大模型
+    #model_name可能是"llava-v1.5-7b"，
     if 'llava' in model_name.lower():
         # Load LLaVA model
+        # 含有lora说明这是一个LoRA适配器，只保存了少量的微调参数，需要model_base提供的基础模型。
+        # 例如model_name为"llava-v1.5-7b-lora"，model_base可能是"liuhaotian/llava-v1.5-7b"
         if 'lora' in model_name.lower() and model_base is None:
             warnings.warn('There is `lora` in model name but no `model_base` is provided. If you are loading a LoRA model, please provide the `model_base` argument. Detailed instruction: https://github.com/haotian-liu/LLaVA#launch-a-model-worker-lora-weights-unmerged.')
+        
         if 'lora' in model_name.lower() and model_base is not None:
             from llava.model.language_model.llava_llama import LlavaConfig
             lora_cfg_pretrained = LlavaConfig.from_pretrained(model_path)
@@ -86,7 +99,9 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             print('Model is loaded...')
         elif model_base is not None:
             # this may be mm projector only
+            # 即输入的model_name可能是一个多模态投影层，例如"llava-1.5-mmproj"，或者"llava-mpt-7b-mmproj"
             print('Loading LLaVA from base model...')
+            # MPT 系列模型，加载方式、配置结构、tokenizer 都和 LLaMA / Vicuna 有区别
             if 'mpt' in model_name.lower():
                 if not os.path.isfile(os.path.join(model_path, 'configuration_mpt.py')):
                     shutil.copyfile(os.path.join(model_base, 'configuration_mpt.py'), os.path.join(model_path, 'configuration_mpt.py'))
@@ -101,10 +116,13 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             mm_projector_weights = torch.load(os.path.join(model_path, 'mm_projector.bin'), map_location='cpu')
             mm_projector_weights = {k: v.to(torch.float16) for k, v in mm_projector_weights.items()}
             model.load_state_dict(mm_projector_weights, strict=False)
+        # model_base is None, 说明输入的model_path是一个完整的多模态大模型，例如"llava-v1.5-7b"，"llava-mpt-7b"，"llava-mistral-7b"
         else:
+            
             if 'mpt' in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
                 model = LlavaMptForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+            # 调用了专门为 Mistral 架构定制的 LLaVA 模型类 LlavaMistralForCausalLM
             elif 'mistral' in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(model_path)
                 model = LlavaMistralForCausalLM.from_pretrained(
@@ -114,6 +132,8 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 )
             else:
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=False)
+                # 同上面两个
+                # 不适用通用的AutoModelForCausalLM，而是LLaVA自己定义的LlavaLlamaForCausalLM，即llava/model/language_model/llava_llama.py
                 model = LlavaLlamaForCausalLM.from_pretrained(
                     model_path,
                     low_cpu_mem_usage=True,
@@ -121,7 +141,9 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 )
     else:
         # Load language model
+        # llava不在model_name中，说明这是一个纯语言模型
         if model_base is not None:
+            # 有基础模型，model_name不是完整的语言模型，可能是一个适配器
             # PEFT model
             from peft import PeftModel
             tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
@@ -133,6 +155,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             print('Convert to FP16...')
             model.to(torch.float16)
         else:
+            #完整语言模型
             use_fast = False
             if 'mpt' in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
@@ -142,6 +165,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 model = AutoModelForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
 
     image_processor = None
+
 
     if 'llava' in model_name.lower():
         mm_use_im_start_end = getattr(model.config, "mm_use_im_start_end", False)
